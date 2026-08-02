@@ -260,6 +260,19 @@ def clean_display_url(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(query), fragment=""))
 
 
+def domain_of(url: str) -> str:
+    host = urlparse(url).netloc.lower().split(":")[0]
+    return host[4:] if host.startswith("www.") else host
+
+
+def is_allowed_source(url: str, allowlist: list[str]) -> bool:
+    """Aceita apenas domínios da lista (e seus subdomínios)."""
+    if not allowlist:
+        return True
+    host = domain_of(url)
+    return any(host == domain or host.endswith(f".{domain}") for domain in allowlist)
+
+
 def language_code(value: str | None) -> str:
     if not value:
         return ""
@@ -361,7 +374,11 @@ def build_gdelt_queries(keywords: list[str]) -> list[str]:
 
 
 def fetch_gdelt(
-    config: dict, keywords: list[str], start: dt.datetime, end: dt.datetime
+    config: dict,
+    keywords: list[str],
+    allowlist: list[str],
+    start: dt.datetime,
+    end: dt.datetime,
 ) -> list[Article]:
     gdelt_config = config.get("gdelt") or {}
     if not gdelt_config.get("enabled", True):
@@ -378,7 +395,7 @@ def fetch_gdelt(
     for index, query in enumerate(queries, start=1):
         try:
             collected = gdelt_collect(
-                session, query, keywords, start, end, max_records, budget
+                session, query, keywords, allowlist, start, end, max_records, budget
             )
         except GdeltBlocked:
             # O bloqueio é por IP e vale para a API inteira: insistir nas demais
@@ -402,6 +419,7 @@ def gdelt_collect(
     session: requests.Session,
     query: str,
     keywords: list[str],
+    allowlist: list[str],
     window_start: dt.datetime,
     window_end: dt.datetime,
     max_records: int,
@@ -436,6 +454,8 @@ def gdelt_collect(
         title = clean_text(item.get("title"))
         if not url or not title:
             continue
+        if not is_allowed_source(url, allowlist):
+            continue
         published = parse_gdelt_date(item.get("seendate", ""))
         if published is None or not window_start <= published <= window_end:
             continue
@@ -469,6 +489,7 @@ def gdelt_collect(
                         session,
                         query,
                         keywords,
+                        allowlist,
                         sub_start,
                         sub_end,
                         max_records,
@@ -523,10 +544,25 @@ def entry_description(entry) -> str:
 
 
 def fetch_rss(
-    config: dict, keywords: list[str], start: dt.datetime, end: dt.datetime
+    config: dict,
+    keywords: list[str],
+    allowlist: list[str],
+    start: dt.datetime,
+    end: dt.datetime,
 ) -> list[Article]:
     feeds = config.get("rss_feeds") or []
     articles: list[Article] = []
+
+    # Vários veículos devolvem uma página de bloqueio para clientes que não
+    # parecem navegador, então o XML é baixado aqui e só depois interpretado.
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": BROWSER_UA,
+            "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+            "Accept-Language": "*",
+        }
+    )
 
     for feed_config in feeds:
         if not feed_config.get("enabled", False):
@@ -536,14 +572,14 @@ def fetch_rss(
             continue
         name = feed_config.get("name") or urlparse(url).netloc
         try:
-            parsed_feed = feedparser.parse(
-                url, agent=USER_AGENT, request_headers={"Accept": "application/rss+xml, */*"}
-            )
-        except Exception as error:  # feedparser encapsula erros de rede de várias formas
-            print(f"  Falha ao ler o feed '{name}': {error}")
+            response = session.get(url, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+            parsed_feed = feedparser.parse(response.content)
+        except requests.RequestException as error:
+            print(f"  Feed '{name}' indisponível: {error}")
             continue
-        if getattr(parsed_feed, "bozo", 0) and not parsed_feed.entries:
-            print(f"  Feed '{name}' indisponível: {parsed_feed.get('bozo_exception')}")
+        if not parsed_feed.entries:
+            print(f"  Feed '{name}' sem entradas: {parsed_feed.get('bozo_exception')}")
             continue
 
         feed_language = parsed_feed.feed.get("language") if parsed_feed.feed else ""
@@ -552,6 +588,8 @@ def fetch_rss(
             link = (entry.get("link") or "").strip()
             title = clean_text(entry.get("title"))
             if not link or not title:
+                continue
+            if not is_allowed_source(link, allowlist):
                 continue
             published = entry_datetime(entry)
             if published is None or not start <= published.astimezone(start.tzinfo) <= end:
@@ -775,9 +813,16 @@ def main() -> int:
     keywords = [str(item) for item in (config.get("keywords") or []) if str(item).strip()]
     threshold = int((config.get("deduplication") or {}).get("title_similarity_threshold", 92))
 
+    sources = config.get("sources") or {}
+    allowlist = []
+    if sources.get("official_only", True):
+        allowlist = [str(d).strip().lower() for d in (sources.get("allowlist") or []) if str(d).strip()]
+
     print(f"Coletando notícias de {target.isoformat()} ({timezone_name})")
-    articles = fetch_gdelt(config, keywords, start, end)
-    articles += fetch_rss(config, keywords, start, end)
+    if allowlist:
+        print(f"Restrito a {len(allowlist)} veículos oficiais da lista de fontes.")
+    articles = fetch_gdelt(config, keywords, allowlist, start, end)
+    articles += fetch_rss(config, keywords, allowlist, start, end)
     print(f"Total bruto: {len(articles)} artigo(s)")
 
     articles = deduplicate(articles, threshold)

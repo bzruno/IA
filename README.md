@@ -71,6 +71,34 @@ Só entram feeds que publiquem o **link direto do veículo**. Agregadores como o
 apontam para um redirecionador que não devolve o artigo, então deles não é possível
 extrair texto algum.
 
+## Apenas veículos oficiais
+
+O bloco `sources` do `config.yaml` restringe o relatório a domínios conhecidos — agências,
+jornais, veículos de tecnologia estabelecidos e os blogs oficiais das empresas de IA:
+
+```yaml
+sources:
+  official_only: true
+  allowlist:
+    - reuters.com
+    - bbc.com
+    - openai.com
+```
+
+A regra vale para **as duas fontes**: o GDELT indexa milhares de sites, e sem essa lista
+ele traz muito portal desconhecido. Subdomínios são aceitos automaticamente
+(`g1.globo.com` entra por `globo.com`). Para aceitar qualquer domínio, use
+`official_only: false`.
+
+Alguns veículos importantes não têm mais RSS público — verificado em agosto de 2026:
+
+| Veículo | Situação | Como entra no relatório |
+| --- | --- | --- |
+| Reuters, AP | RSS encerrado (404/401) | pelo GDELT, via `allowlist` |
+| CNN | RSS existe, mas parado desde 2016 | pelo GDELT, via `allowlist` |
+| NYT, Bloomberg, FT, Le Monde | feed ativo, texto bloqueado por paywall | fora do relatório |
+| Anthropic, Mistral, xAI | não publicam RSS | pelo GDELT, via `allowlist` |
+
 ## Execução pelo GitHub Actions
 
 O workflow `.github/workflows/daily.yml` roda diariamente às 09:00 UTC (06:00 em
@@ -102,6 +130,20 @@ garantem um relatório útil mesmo com o GDELT indisponível.
 
 Rodando localmente, se aparecer `GDELT bloqueou este IP`, não execute em paralelo nem
 repetidamente: espere uns 15 minutos e rode **uma vez**.
+
+### Alternativas ao GDELT
+
+| Alternativa | Custo | Link direto? | Observação |
+| --- | --- | --- | --- |
+| **RSS dos próprios veículos** | grátis | sim | é o que este projeto usa; sem limite de requisição |
+| NewsAPI.org | chave; grátis só para desenvolvimento | sim | plano gratuito atrasa as notícias em 24h |
+| GNews.io | chave; 100 consultas/dia | sim | cobertura menor |
+| Event Registry, NewsCatcher | pago | sim | cobertura ampla, multilíngue |
+| Google News RSS | grátis | **não** | link de redirecionamento: impede extrair o texto |
+| Common Crawl (CC-NEWS) | grátis | sim | arquivos WARC de dezenas de GB por dia |
+
+Na prática, o RSS dos veículos substitui o GDELT para as fontes que têm feed, e o GDELT
+continua útil justamente para as que não têm (Reuters, AP, CNN, Anthropic).
 
 ## Limitações
 

@@ -4,21 +4,43 @@ gdelt:
   enabled: true
   max_records: 250
 
-# Só feeds que publicam o link direto do veículo: agregadores como o Google News
-# apontam para um redirecionador, de onde não é possível extrair o texto.
+# Feeds de veículos estabelecidos e blogs oficiais das empresas. Todos publicam o
+# link direto da matéria — agregadores como o Google News apontam para um
+# redirecionador, do qual não é possível extrair o texto.
+# Reuters e AP encerraram seus RSS públicos; Anthropic, Mistral e xAI não publicam
+# feed. Notícias desses veículos entram pelo GDELT, via lista de fontes abaixo.
 rss_feeds:
   - name: Exemplo
     url: https://exemplo.com/feed.xml
     enabled: false
 
+  # --- veículos internacionais ---
+  - name: BBC Technology
+    url: https://feeds.bbci.co.uk/news/technology/rss.xml
+    enabled: true
+  - name: The Guardian (IA)
+    url: https://www.theguardian.com/technology/artificialintelligenceai/rss
+    enabled: true
+  - name: CNBC Technology
+    url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910
+    enabled: true
+  - name: Yahoo News (Tech)
+    url: https://news.yahoo.com/rss/tech
+    enabled: true
+  - name: Al Jazeera
+    url: https://www.aljazeera.com/xml/rss/all.xml
+    enabled: true
+  - name: Deutsche Welle
+    url: https://rss.dw.com/rdf/rss-en-all
+    enabled: true
+  - name: South China Morning Post (Tech)
+    url: https://www.scmp.com/rss/36/feed
+    enabled: true
   - name: TechCrunch AI
     url: https://techcrunch.com/category/artificial-intelligence/feed/
     enabled: true
-  - name: The Verge
-    url: https://www.theverge.com/rss/index.xml
-    enabled: true
-  - name: MIT Technology Review
-    url: https://www.technologyreview.com/feed/
+  - name: The Verge (IA)
+    url: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
     enabled: true
   - name: Wired AI
     url: https://www.wired.com/feed/tag/ai/latest/rss
@@ -26,40 +48,157 @@ rss_feeds:
   - name: ZDNet AI
     url: https://www.zdnet.com/topic/artificial-intelligence/rss.xml
     enabled: true
+  - name: MIT Technology Review
+    url: https://www.technologyreview.com/feed/
+    enabled: true
+  - name: Engadget
+    url: https://www.engadget.com/rss.xml
+    enabled: true
 
-  - name: Olhar Digital
-    url: https://olhardigital.com.br/feed/
+  # --- Brasil e demais idiomas ---
+  - name: G1 Tecnologia
+    url: https://g1.globo.com/rss/g1/tecnologia/
     enabled: true
-  - name: Tecnoblog
-    url: https://tecnoblog.net/feed/
+  - name: Folha de S.Paulo (Tec)
+    url: https://feeds.folha.uol.com.br/tec/rss091.xml
     enabled: true
-  - name: Hipertextual
-    url: https://hipertextual.com/feed
+  - name: El País Tecnología
+    url: https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/section/tecnologia/portada
+    enabled: true
+  - name: BBC Mundo
+    url: https://feeds.bbci.co.uk/mundo/rss.xml
     enabled: true
   - name: Numerama
     url: https://www.numerama.com/feed/
     enabled: true
-  - name: ActuIA
-    url: https://www.actuia.com/feed/
-    enabled: true
-  - name: t3n KI
-    url: https://t3n.de/tag/kuenstliche-intelligenz/rss.xml
+  - name: Der Spiegel (Netzwelt)
+    url: https://www.spiegel.de/netzwelt/index.rss
     enabled: true
   - name: Heise
     url: https://www.heise.de/rss/heise-atom.xml
     enabled: true
-  - name: Il Sole 24 Ore Tecnologia
-    url: https://www.ilsole24ore.com/rss/tecnologia.xml
-    enabled: true
   - name: ITmedia AI+
     url: https://rss.itmedia.co.jp/rss/2.0/aiplus.xml
     enabled: true
-  - name: 36Kr
-    url: https://36kr.com/feed
+
+  # --- blogs oficiais das empresas ---
+  - name: OpenAI
+    url: https://openai.com/news/rss.xml
     enabled: true
-  - name: Solidot
-    url: https://www.solidot.org/index.rss
+  - name: Google DeepMind
+    url: https://deepmind.google/blog/rss.xml
     enabled: true
+  - name: Google (IA)
+    url: https://blog.google/technology/ai/rss/
+    enabled: true
+  - name: Microsoft
+    url: https://blogs.microsoft.com/feed/
+    enabled: true
+  - name: Meta
+    url: https://about.fb.com/news/feed/
+    enabled: true
+  - name: Nvidia
+    url: https://blogs.nvidia.com/feed/
+    enabled: true
+  - name: Hugging Face
+    url: https://huggingface.co/blog/feed.xml
+    enabled: true
+  - name: AWS Machine Learning
+    url: https://aws.amazon.com/blogs/machine-learning/feed/
+    enabled: true
+
+# Só entram notícias hospedadas nestes domínios (e em seus subdomínios). Vale para
+# o GDELT e para os feeds. Coloque `official_only: false` para aceitar qualquer um.
+sources:
+  official_only: true
+  allowlist:
+    # agências e jornais
+    - reuters.com
+    - apnews.com
+    - afp.com
+    - bbc.com
+    - bbc.co.uk
+    - cnn.com
+    - cnnbrasil.com.br
+    - nytimes.com
+    - washingtonpost.com
+    - wsj.com
+    - ft.com
+    - bloomberg.com
+    - cnbc.com
+    - theguardian.com
+    - aljazeera.com
+    - dw.com
+    - euronews.com
+    - yahoo.com
+    - npr.org
+    - forbes.com
+    - time.com
+    - axios.com
+    - politico.com
+    - businessinsider.com
+    - nbcnews.com
+    - cbsnews.com
+    - abcnews.go.com
+    - scmp.com
+    - nikkei.com
+    - asahi.com
+    - nhk.or.jp
+    - lemonde.fr
+    - lefigaro.fr
+    - elpais.com
+    - elmundo.es
+    - spiegel.de
+    - zeit.de
+    - faz.net
+    - handelsblatt.com
+    - corriere.it
+    - ilsole24ore.com
+    # veículos de tecnologia
+    - techcrunch.com
+    - theverge.com
+    - wired.com
+    - zdnet.com
+    - arstechnica.com
+    - engadget.com
+    - venturebeat.com
+    - technologyreview.com
+    - heise.de
+    - t3n.de
+    - itmedia.co.jp
+    - numerama.com
+    - 36kr.com
+    # Brasil
+    - globo.com
+    - folha.uol.com.br
+    - folha.com.br
+    - uol.com.br
+    - estadao.com.br
+    - exame.com
+    - infomoney.com.br
+    - tecnoblog.net
+    - olhardigital.com.br
+    - canaltech.com.br
+    # empresas
+    - openai.com
+    - anthropic.com
+    - deepmind.google
+    - blog.google
+    - google.com
+    - ai.meta.com
+    - about.fb.com
+    - meta.com
+    - microsoft.com
+    - nvidia.com
+    - mistral.ai
+    - x.ai
+    - huggingface.co
+    - aws.amazon.com
+    - ibm.com
+    - apple.com
+    - intel.com
+    - amd.com
+    - qualcomm.com
 
 keywords:
   - artificial intelligence
