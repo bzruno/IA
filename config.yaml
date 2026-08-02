@@ -4,21 +4,61 @@ gdelt:
   enabled: true
   max_records: 250
 
+# Só feeds que publicam o link direto do veículo: agregadores como o Google News
+# apontam para um redirecionador, de onde não é possível extrair o texto.
 rss_feeds:
   - name: Exemplo
     url: https://exemplo.com/feed.xml
     enabled: false
+
   - name: TechCrunch AI
     url: https://techcrunch.com/category/artificial-intelligence/feed/
     enabled: true
-  - name: VentureBeat AI
-    url: https://venturebeat.com/category/ai/feed/
+  - name: The Verge
+    url: https://www.theverge.com/rss/index.xml
     enabled: true
   - name: MIT Technology Review
     url: https://www.technologyreview.com/feed/
     enabled: true
-  - name: Google News (AI)
-    url: https://news.google.com/rss/search?q=%22artificial+intelligence%22&hl=en-US&gl=US&ceid=US:en
+  - name: Wired AI
+    url: https://www.wired.com/feed/tag/ai/latest/rss
+    enabled: true
+  - name: ZDNet AI
+    url: https://www.zdnet.com/topic/artificial-intelligence/rss.xml
+    enabled: true
+
+  - name: Olhar Digital
+    url: https://olhardigital.com.br/feed/
+    enabled: true
+  - name: Tecnoblog
+    url: https://tecnoblog.net/feed/
+    enabled: true
+  - name: Hipertextual
+    url: https://hipertextual.com/feed
+    enabled: true
+  - name: Numerama
+    url: https://www.numerama.com/feed/
+    enabled: true
+  - name: ActuIA
+    url: https://www.actuia.com/feed/
+    enabled: true
+  - name: t3n KI
+    url: https://t3n.de/tag/kuenstliche-intelligenz/rss.xml
+    enabled: true
+  - name: Heise
+    url: https://www.heise.de/rss/heise-atom.xml
+    enabled: true
+  - name: Il Sole 24 Ore Tecnologia
+    url: https://www.ilsole24ore.com/rss/tecnologia.xml
+    enabled: true
+  - name: ITmedia AI+
+    url: https://rss.itmedia.co.jp/rss/2.0/aiplus.xml
+    enabled: true
+  - name: 36Kr
+    url: https://36kr.com/feed
+    enabled: true
+  - name: Solidot
+    url: https://www.solidot.org/index.rss
     enabled: true
 
 keywords:
@@ -42,3 +82,13 @@ keywords:
 
 deduplication:
   title_similarity_threshold: 92
+
+# Download do texto integral de cada notícia. Páginas fechadas por paywall ou por
+# muro de cookies ficam abaixo de min_chars e entram no relatório só com os
+# metadados — nada aqui tenta contornar esse tipo de bloqueio.
+full_text:
+  enabled: true
+  max_workers: 8
+  timeout_seconds: 20
+  min_chars: 400
+  max_chars: 20000

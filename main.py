@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Coleta notícias globais sobre Inteligência Artificial e gera um relatório Markdown.
+"""Coleta notícias globais sobre Inteligência Artificial e gera um relatório Markdown
+com o texto integral de cada notícia.
 
 Uso:
     python main.py                    # notícias do dia anterior
@@ -15,13 +16,15 @@ import html
 import re
 import sys
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import feedparser
 import requests
+import trafilatura
 import yaml
 from dateutil import parser as date_parser
 from dateutil import tz
@@ -37,13 +40,20 @@ GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 # consultas, espaçadas com folga e com esperas longas quando o bloqueio acontece.
 GDELT_INTERVAL = 10.0
 GDELT_KEYWORDS_PER_QUERY = 5
-GDELT_BACKOFF = (60, 120, 240)
+GDELT_BACKOFF = (60, 120)
 # Quando uma consulta devolve o máximo de registros, o dia é dividido em janelas
 # menores para não perder notícias. O teto de requisições protege contra bloqueios.
 GDELT_MAX_SPLIT_DEPTH = 2
 GDELT_MAX_REQUESTS = 14
 USER_AGENT = "IA-News/1.0 (+https://github.com/)"
 HTTP_TIMEOUT = 60
+# Para baixar as páginas das notícias: veículos costumam recusar clientes sem
+# aparência de navegador. Nada aqui tenta contornar paywall — o que vier fechado
+# simplesmente fica sem texto.
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 TRACKING_PARAMS = {
     "utm_source",
@@ -58,9 +68,10 @@ TRACKING_PARAMS = {
 # Termos que sozinhos não garantem relação com IA (nome de pessoa, signo, vento...).
 AMBIGUOUS_KEYWORDS = {"gemini", "claude", "mistral"}
 
-# "AI", "A.I.", "IA", "I.A." em caixa alta são sinais de IA em praticamente qualquer idioma.
-# A checagem é sensível a maiúsculas para não casar com palavras comuns ("j'ai", "ele ia").
-AI_ACRONYM_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:A\.?I|I\.?A)\.?(?![A-Za-z0-9])")
+# "AI", "A.I.", "IA", "I.A." e "KI" (alemão) em caixa alta são sinais de IA em
+# praticamente qualquer idioma. A checagem é sensível a maiúsculas para não casar
+# com palavras comuns ("j'ai" em francês, "ele ia" em português).
+AI_ACRONYM_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:A\.?I|I\.?A|KI)\.?(?![A-Za-z0-9])")
 
 # Sinais de contexto de IA em vários idiomas (comparados sem distinção de maiúsculas).
 AI_CONTEXT_TOKENS = [
@@ -161,6 +172,10 @@ LANGUAGE_CODES = {
 }
 
 
+class GdeltBlocked(RuntimeError):
+    """A GDELT recusou as requisições deste IP; insistir só prolonga o bloqueio."""
+
+
 @dataclass
 class Article:
     title: str
@@ -170,6 +185,7 @@ class Article:
     description: str
     url: str
     url_key: str
+    text: str = field(default="")
 
 
 # --------------------------------------------------------------------------- #
@@ -322,26 +338,25 @@ def gdelt_request(session: requests.Session, params: dict) -> list[dict]:
             # A API responde em texto puro quando a consulta é recusada.
             print(f"  Resposta não-JSON do GDELT: {response.text.strip()[:200]}")
             return []
-    print("  GDELT segue bloqueando; esta consulta foi ignorada (tente de novo mais tarde).")
-    return []
+    raise GdeltBlocked
 
 
-def build_gdelt_queries(keywords: list[str]) -> list[tuple[str, bool]]:
+def build_gdelt_queries(keywords: list[str]) -> list[str]:
     """Agrupa os termos em poucas consultas OR, para reduzir chamadas à API.
 
-    Devolve pares (consulta, exige_contexto). Os termos ambíguos vão numa consulta
-    própria que já exige contexto de IA no próprio artigo.
+    Os termos ambíguos vão numa consulta própria, que já exige contexto de IA no
+    próprio artigo.
     """
     strong = [k for k in keywords if k.lower() not in AMBIGUOUS_KEYWORDS]
     ambiguous = [k for k in keywords if k.lower() in AMBIGUOUS_KEYWORDS]
 
-    queries: list[tuple[str, bool]] = []
+    queries: list[str] = []
     for index in range(0, len(strong), GDELT_KEYWORDS_PER_QUERY):
         chunk = strong[index : index + GDELT_KEYWORDS_PER_QUERY]
-        queries.append(("(" + " OR ".join(f'"{k}"' for k in chunk) + ")", False))
+        queries.append("(" + " OR ".join(f'"{k}"' for k in chunk) + ")")
     if ambiguous:
         terms = " OR ".join(f'"{k}"' for k in ambiguous)
-        queries.append((f'({terms}) ("AI" OR "artificial intelligence")', True))
+        queries.append(f'({terms}) ("AI" OR "artificial intelligence")')
     return queries
 
 
@@ -360,12 +375,25 @@ def fetch_gdelt(
     queries = build_gdelt_queries(keywords)
     budget = [GDELT_MAX_REQUESTS]
     articles: list[Article] = []
-    for index, (query, needs_context) in enumerate(queries, start=1):
-        collected = gdelt_collect(
-            session, query, needs_context, start, end, max_records, budget
-        )
+    for index, query in enumerate(queries, start=1):
+        try:
+            collected = gdelt_collect(
+                session, query, keywords, start, end, max_records, budget
+            )
+        except GdeltBlocked:
+            # O bloqueio é por IP e vale para a API inteira: insistir nas demais
+            # consultas só prolongaria a punição. O relatório segue com os RSS.
+            print(
+                "  GDELT bloqueou este IP (limite por endereço, comum em nuvem). "
+                "Consultas restantes canceladas; seguindo com os feeds RSS.",
+                flush=True,
+            )
+            break
         articles.extend(collected)
         print(f"  GDELT [{index}/{len(queries)}]: {len(collected)} artigo(s)", flush=True)
+        if budget[0] <= 0:
+            print("  Limite de requisições ao GDELT atingido; seguindo com os feeds RSS.")
+            break
 
     return articles
 
@@ -373,7 +401,7 @@ def fetch_gdelt(
 def gdelt_collect(
     session: requests.Session,
     query: str,
-    needs_context: bool,
+    keywords: list[str],
     window_start: dt.datetime,
     window_end: dt.datetime,
     max_records: int,
@@ -411,8 +439,9 @@ def gdelt_collect(
         published = parse_gdelt_date(item.get("seendate", ""))
         if published is None or not window_start <= published <= window_end:
             continue
-        # Termos ambíguos (Claude, Gemini, Mistral) exigem sinal de IA no título.
-        if needs_context and not has_ai_context(title):
+        # O GDELT casa a consulta com o texto inteiro do artigo, então devolve muita
+        # notícia que só cita IA de passagem. O título precisa confirmar o assunto.
+        if not is_ai_related(title, keywords):
             continue
         articles.append(
             Article(
@@ -434,18 +463,24 @@ def gdelt_collect(
             flush=True,
         )
         for sub_start, sub_end in ((window_start, middle), (middle, window_end)):
-            articles.extend(
-                gdelt_collect(
-                    session,
-                    query,
-                    needs_context,
-                    sub_start,
-                    sub_end,
-                    max_records,
-                    budget,
-                    depth + 1,
+            try:
+                articles.extend(
+                    gdelt_collect(
+                        session,
+                        query,
+                        keywords,
+                        sub_start,
+                        sub_end,
+                        max_records,
+                        budget,
+                        depth + 1,
+                    )
                 )
-            )
+            except GdeltBlocked:
+                # Preserva o que já foi coletado e encerra o uso da API.
+                print("  GDELT bloqueou o IP no meio da coleta; mantendo o que já veio.")
+                budget[0] = 0
+                break
 
     return articles
 
@@ -469,6 +504,15 @@ def entry_datetime(entry) -> dt.datetime | None:
                 continue
             return value if value.tzinfo else value.replace(tzinfo=tz.UTC)
     return None
+
+
+def is_echo_of_title(description: str, title: str, source: str) -> bool:
+    """Descrição que só repete o título (com ou sem o nome do veículo) não informa nada."""
+    normalized = normalize_title(description)
+    normalized_source = normalize_title(source)
+    if normalized_source and normalized.endswith(normalized_source):
+        normalized = normalized[: -len(normalized_source)].strip()
+    return fuzz.token_sort_ratio(normalized, normalize_title(title)) >= 90
 
 
 def entry_description(entry) -> str:
@@ -516,6 +560,14 @@ def fetch_rss(
             if not is_ai_related(f"{title} {description}", keywords):
                 continue
             source = clean_text(entry.get("source", {}).get("title")) or name
+            # Agregadores (Google News) anexam " - Veículo" ao título e repetem o
+            # título como descrição; sem limpar isso a deduplicação não enxerga que
+            # duas entradas são a mesma notícia.
+            suffix = f" - {source}"
+            if title.endswith(suffix) and len(title) > len(suffix):
+                title = title[: -len(suffix)].strip()
+            if description and is_echo_of_title(description, title, source):
+                description = ""
             articles.append(
                 Article(
                     title=title,
@@ -574,6 +626,68 @@ def deduplicate(articles: list[Article], threshold: int) -> list[Article]:
 
 
 # --------------------------------------------------------------------------- #
+# Texto integral das notícias
+# --------------------------------------------------------------------------- #
+
+
+def extract_text(html_bytes: bytes, url: str, title: str = "") -> str:
+    """Extrai o corpo da notícia, descartando menus, anúncios e comentários."""
+    text = trafilatura.extract(
+        html_bytes,
+        url=url,
+        include_comments=False,
+        include_tables=False,
+        favor_precision=True,
+    )
+    if not text:
+        return ""
+    paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
+    # A extração costuma repetir o título como primeira linha do corpo.
+    if paragraphs and title and normalize_title(paragraphs[0]) == normalize_title(title):
+        paragraphs.pop(0)
+    return "\n\n".join(paragraphs)
+
+
+def fetch_full_texts(articles: list[Article], config: dict) -> None:
+    """Baixa cada notícia e guarda o texto no artigo (in-place)."""
+    settings = config.get("full_text") or {}
+    if not settings.get("enabled", True) or not articles:
+        return
+
+    workers = max(1, int(settings.get("max_workers", 8)))
+    timeout = int(settings.get("timeout_seconds", 20))
+    min_chars = int(settings.get("min_chars", 400))
+    max_chars = int(settings.get("max_chars", 20000))
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": BROWSER_UA, "Accept-Language": "*"})
+
+    def download(article: Article) -> None:
+        try:
+            response = session.get(article.url, timeout=timeout, allow_redirects=True)
+            response.raise_for_status()
+        except requests.RequestException:
+            return
+        text = extract_text(response.content, response.url, article.title)
+        # Textos muito curtos costumam ser aviso de cookies ou chamada de paywall.
+        if len(text) < min_chars:
+            return
+        if len(text) > max_chars:
+            text = text[:max_chars].rsplit("\n\n", 1)[0] + "\n\n_[texto truncado]_"
+        article.text = text
+
+    print(f"Baixando o texto de {len(articles)} notícia(s)...", flush=True)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(download, articles))
+
+    with_text = sum(1 for article in articles if article.text)
+    print(
+        f"Texto integral obtido em {with_text} de {len(articles)} notícia(s).",
+        flush=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Relatório Markdown
 # --------------------------------------------------------------------------- #
 
@@ -611,11 +725,28 @@ def render_markdown(articles: list[Article], target: dt.date, zone, timezone_nam
             lines.append(f"- **Idioma:** {article.language}")
         lines.append(f"- **Link:** {article.url}")
         lines.append("")
-        if article.description:
-            lines.append(article.description)
+        body = article.text or article.description
+        if body:
+            lines.append(sanitize_body(body))
+            lines.append("")
+        if not article.text:
+            lines.append("_Texto integral indisponível na fonte._")
             lines.append("")
 
     return "\n".join(lines)
+
+
+def sanitize_body(text: str) -> str:
+    """Impede que o texto da notícia quebre a estrutura do Markdown."""
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"[-=_*]{3,}", stripped):
+            continue  # viraria uma linha horizontal, separando notícias por engano
+        if stripped.startswith("#"):
+            stripped = "\\" + stripped  # viraria um título da hierarquia do relatório
+        lines.append(stripped)
+    return "\n".join(lines).strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -651,6 +782,8 @@ def main() -> int:
 
     articles = deduplicate(articles, threshold)
     print(f"Após deduplicação: {len(articles)} artigo(s)")
+
+    fetch_full_texts(articles, config)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"IA_{target.strftime('%Y%m%d')}.md"

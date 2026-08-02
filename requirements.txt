@@ -3,3 +3,4 @@ feedparser
 PyYAML
 rapidfuzz
 python-dateutil
+trafilatura
