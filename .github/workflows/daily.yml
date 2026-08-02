@@ -1,0 +1,51 @@
+name: Notícias de IA (diário)
+
+on:
+  schedule:
+    # 09:00 UTC = 06:00 em America/Sao_Paulo
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: Data no formato YYYY-MM-DD
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Coletar notícias
+        env:
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
+        run: |
+          if [ -n "$TARGET_DATE" ]; then
+            python main.py --date "$TARGET_DATE"
+          else
+            python main.py
+          fi
+
+      - name: Commitar alterações em output/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração em output/; nada a commitar."
+          else
+            git commit -m "Notícias de IA: atualiza output/"
+            git push
+          fi

@@ -1,0 +1,44 @@
+timezone: America/Sao_Paulo
+
+gdelt:
+  enabled: true
+  max_records: 250
+
+rss_feeds:
+  - name: Exemplo
+    url: https://exemplo.com/feed.xml
+    enabled: false
+  - name: TechCrunch AI
+    url: https://techcrunch.com/category/artificial-intelligence/feed/
+    enabled: true
+  - name: VentureBeat AI
+    url: https://venturebeat.com/category/ai/feed/
+    enabled: true
+  - name: MIT Technology Review
+    url: https://www.technologyreview.com/feed/
+    enabled: true
+  - name: Google News (AI)
+    url: https://news.google.com/rss/search?q=%22artificial+intelligence%22&hl=en-US&gl=US&ceid=US:en
+    enabled: true
+
+keywords:
+  - artificial intelligence
+  - generative AI
+  - machine learning
+  - deep learning
+  - large language model
+  - LLM
+  - OpenAI
+  - Anthropic
+  - Gemini
+  - Claude
+  - ChatGPT
+  - DeepMind
+  - Mistral
+  - xAI
+  - AI agents
+  - AI regulation
+  - AI chips
+
+deduplication:
+  title_similarity_threshold: 92
