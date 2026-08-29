@@ -1,5 +1,13 @@
 timezone: America/Sao_Paulo
 
+# Quantas notícias entram no relatório e qual a nota mínima para uma delas ser
+# publicada. A nota vem de: tipo do acontecimento (lançamento de modelo, aquisição,
+# regulação, incidente de segurança...), empresas citadas no título, faixa da fonte
+# e número de veículos que noticiaram o mesmo caso. Ver EVENT_SIGNALS em main.py.
+report:
+  max_articles: 15
+  min_score: 3
+
 gdelt:
   enabled: true
   max_records: 250
@@ -21,12 +29,16 @@ rss_feeds:
   - name: The Guardian (IA)
     url: https://www.theguardian.com/technology/artificialintelligenceai/rss
     enabled: true
+    ai_only: true
   - name: CNBC Technology
     url: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910
     enabled: true
+  # Desligado: apesar do endereço, este feed só aponta para finance.yahoo.com, que
+  # republica recomendação de ação ("Billionaire Just Bought This AI Stock"). O
+  # conteúdo de agência que o Yahoo espelha já entra pelo GDELT, na fonte original.
   - name: Yahoo News (Tech)
     url: https://news.yahoo.com/rss/tech
-    enabled: true
+    enabled: false
   - name: Al Jazeera
     url: https://www.aljazeera.com/xml/rss/all.xml
     enabled: true
@@ -39,15 +51,19 @@ rss_feeds:
   - name: TechCrunch AI
     url: https://techcrunch.com/category/artificial-intelligence/feed/
     enabled: true
+    ai_only: true
   - name: The Verge (IA)
     url: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
     enabled: true
+    ai_only: true
   - name: Wired AI
     url: https://www.wired.com/feed/tag/ai/latest/rss
     enabled: true
+    ai_only: true
   - name: ZDNet AI
     url: https://www.zdnet.com/topic/artificial-intelligence/rss.xml
     enabled: true
+    ai_only: true
   - name: MIT Technology Review
     url: https://www.technologyreview.com/feed/
     enabled: true
@@ -80,17 +96,21 @@ rss_feeds:
   - name: ITmedia AI+
     url: https://rss.itmedia.co.jp/rss/2.0/aiplus.xml
     enabled: true
+    ai_only: true
 
   # --- blogs oficiais das empresas ---
   - name: OpenAI
     url: https://openai.com/news/rss.xml
     enabled: true
+    ai_only: true
   - name: Google DeepMind
     url: https://deepmind.google/blog/rss.xml
     enabled: true
+    ai_only: true
   - name: Google (IA)
     url: https://blog.google/technology/ai/rss/
     enabled: true
+    ai_only: true
   - name: Microsoft
     url: https://blogs.microsoft.com/feed/
     enabled: true
@@ -103,14 +123,78 @@ rss_feeds:
   - name: Hugging Face
     url: https://huggingface.co/blog/feed.xml
     enabled: true
+    ai_only: true
   - name: AWS Machine Learning
     url: https://aws.amazon.com/blogs/machine-learning/feed/
     enabled: true
+    ai_only: true
 
 # Só entram notícias hospedadas nestes domínios (e em seus subdomínios). Vale para
 # o GDELT e para os feeds. Coloque `official_only: false` para aceitar qualquer um.
+#
+# As faixas em `tiers` somam (ou subtraem) pontos na nota de relevância. Quando um
+# domínio casa com mais de uma faixa, vence o domínio mais específico — por isso
+# `aws.amazon.com` pesa como tutorial mesmo com `amazon.com` na faixa `empresa`.
 sources:
   official_only: true
+  default_weight: 0
+  tiers:
+    # anúncio na fonte primária: a empresa falando do próprio produto
+    empresa:
+      weight: 4
+      domains:
+        - openai.com
+        - anthropic.com
+        - deepmind.google
+        - blog.google
+        - ai.meta.com
+        - about.fb.com
+        - microsoft.com
+        - nvidia.com
+        - mistral.ai
+        - x.ai
+        - huggingface.co
+        - apple.com
+        - amazon.com
+        - ibm.com
+        - intel.com
+        - amd.com
+        - qualcomm.com
+    # agências e jornais de referência: apuram e confirmam
+    agencia:
+      weight: 3
+      domains:
+        - reuters.com
+        - apnews.com
+        - afp.com
+        - bloomberg.com
+        - ft.com
+        - wsj.com
+        - nytimes.com
+        - washingtonpost.com
+        - cnbc.com
+        - bbc.com
+        - bbc.co.uk
+        - theguardian.com
+        - nikkei.com
+        - scmp.com
+    # imprensa especializada: rápida, mas com mais ruído de produto
+    tecnologia:
+      weight: 1
+      domains:
+        - techcrunch.com
+        - theverge.com
+        - wired.com
+        - arstechnica.com
+        - technologyreview.com
+        - zdnet.com
+        - venturebeat.com
+        - engadget.com
+    # blogs de tutorial de produto: material técnico útil, mas não é notícia
+    tutorial:
+      weight: -4
+      domains:
+        - aws.amazon.com
   allowlist:
     # agências e jornais
     - reuters.com
@@ -130,7 +214,9 @@ sources:
     - aljazeera.com
     - dw.com
     - euronews.com
-    - yahoo.com
+    # yahoo.com ficou de fora: é agregador, e o braço que indexa notícia de IA é o
+    # finance.yahoo.com, que republica recomendação de ação. O que ele espelha de
+    # agência entra aqui pela fonte original (reuters.com, apnews.com).
     - npr.org
     - forbes.com
     - time.com

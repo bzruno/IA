@@ -16,6 +16,8 @@ permissions:
 jobs:
   coletar:
     runs-on: ubuntu-latest
+    # Uma coleta normal leva poucos minutos; acima disso algo travou.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +39,24 @@ jobs:
           else
             python main.py
           fi
+
+      - name: Conferir se o relatório do dia saiu
+        env:
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
+        run: |
+          if [ -n "$TARGET_DATE" ]; then
+            DIA="$TARGET_DATE"
+          else
+            DIA=$(TZ=America/Sao_Paulo date -d "yesterday" +%Y-%m-%d)
+          fi
+          ARQUIVO="output/IA_$(echo "$DIA" | tr -d '-').md"
+          if [ ! -f "$ARQUIVO" ]; then
+            echo "::error::O relatório $ARQUIVO não foi gerado."
+            exit 1
+          fi
+          echo "### $ARQUIVO" >> "$GITHUB_STEP_SUMMARY"
+          grep -c '^## [0-9]' "$ARQUIVO" | xargs -I{} echo "{} notícia(s) publicada(s)." \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Commitar alterações em output/
         run: |

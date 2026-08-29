@@ -28,7 +28,7 @@ import trafilatura
 import yaml
 from dateutil import parser as date_parser
 from dateutil import tz
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -45,6 +45,8 @@ GDELT_BACKOFF = (60, 120)
 # menores para não perder notícias. O teto de requisições protege contra bloqueios.
 GDELT_MAX_SPLIT_DEPTH = 2
 GDELT_MAX_REQUESTS = 14
+# A API rejeita a consulta inteira se qualquer termo tiver menos de 4 caracteres.
+GDELT_MIN_PHRASE = 4
 USER_AGENT = "IA-News/1.0 (+https://github.com/)"
 HTTP_TIMEOUT = 60
 # Para baixar as páginas das notícias: veículos costumam recusar clientes sem
@@ -98,6 +100,336 @@ AI_CONTEXT_TOKENS = [
     "modelo de linguagem",
     "language model",
 ]
+
+# --------------------------------------------------------------------------- #
+# Relevância: separar notícia de impacto de ruído editorial
+# --------------------------------------------------------------------------- #
+
+# Um traço, barra vertical ou dois-pontos usados como separador no título.
+_SEP = r"[-–—|:]"
+
+# Formatos que não são notícia: podcast, vídeo, carta do leitor, coluna de
+# opinião, webinar, newsletter, listão, tutorial, resenha, promoção e chamada de
+# evento. Um único casamento descarta o item, por mais que ele cite IA.
+NOISE_TITLE_PATTERNS = [
+    # o próprio título anuncia o formato. "podcast" só conta como marcador de
+    # formato (sufixo, prefixo ou composto alemão) — uma notícia *sobre* podcasts
+    # continua valendo.
+    rf"{_SEP}\s*(v[ií]deo)?podcasts?\s*$",
+    r"^\s*podcasts?\s*[:–—-]",
+    r"\w-podcast\b",
+    r"\bder \w*podcast\b",
+    r"\bvodcast\b",
+    rf"{_SEP}\s*(v[ií]deo|audio|áudio|trailer|teaser|ao vivo|live ?blog)\s*$",
+    rf"^\s*(v[ií]deo|audio|áudio|ao vivo|live ?blog|galeria|fotos)\s*{_SEP}",
+    r"\blive (blog|updates?|coverage)\b",
+    r"\bnewsletters?\b",
+    r"\bwebinars?\b",
+    r"\bwhite ?paper\b",
+    r"#heiseshow",
+    r"\bheise[- ]angebot\b",
+    r"heise\+",
+    r"software-architektur\.tv",
+    r"\bthe download\b",
+    # opinião, cartas do leitor e entrevistas
+    rf"{_SEP}\s*(opini[ãa]o|opinion|an[áa]lise|editorial|coluna|kommentar|meinung"
+    r"|entrevista|interview|debate)\s*$",
+    rf"^\s*(opini[ãa]o|opinion|an[áa]lise|editorial|coluna|kommentar|meinung"
+    rf"|entrevista|interview|q&a)\s*{_SEP}",
+    r"\|\s*letters?\b",
+    r"\bbrief letters\b",
+    r"\bletters? to the editor\b",
+    r"\bcartas? (do|dos) leitor",
+    r"\bq&a\b",
+    r"インタビュー",
+    r"聞いた",
+    r"対談",
+    # listões, guias e tutoriais
+    r"^\s*\d+\s+(new\s+)?(ways?|things?|tips?|reasons?|best|coisas|dicas|motivos|maneiras)\b",
+    r"\bhow to\b",
+    r"\bstep[- ]by[- ]step\b",
+    r"\bcheat sheet\b",
+    r"\btutorials?\b",
+    r"\bhands[- ]on\b",
+    r"\bexplained\s*[:$]",
+    rf"{_SEP}?\s*\bexplained\s*$",
+    r"\bexplicad[oa]s?\b",
+    r"\bguia (de|para|completo)\b",
+    r"\bcomo (fazer|usar|criar|escolher|instalar)\b",
+    r"\bthings you (should|need to) know\b",
+    # recomendação de ação e isca de clique financeira (Motley Fool e afins,
+    # republicados por portais de finanças)
+    r"\bmotley fool\b",
+    r"\bstocks? to buy\b",
+    r"\bbest stocks?\b",
+    r"\bshould you buy\b",
+    r"\bno[- ]brainer\b",
+    r"\bmillionaire[- ]maker\b",
+    r"\bthis (magnificent|incredible|amazing|monster|top|unstoppable)\b",
+    r"\bbillionaire\b.{0,40}\b(bought|buying|just sold|is loading up)\b",
+    r"\bup \d[\d,.\s]*%\s+since\b",
+    r"^\s*prediction\s*:",
+    r"\bações? para comprar\b",
+    # comércio e promoções
+    r"\bgift guide\b",
+    r"\bbest deals?\b",
+    r"\bdeals? of the (day|week)\b",
+    r"\bblack friday\b",
+    r"\bcoupons?\b",
+    r"\bdiscount code\b",
+    r"\bpromo[çc][ãa]o\b",
+    # conteúdo patrocinado e chamada de evento
+    r"\bsponsored\b",
+    r"\badvertorial\b",
+    r"\banzeige\b",
+    r"\bpatrocinad[oa]s?\b",
+    r"\bjoin us\b",
+    r"\bregister (now|today)\b",
+    r"\bsave the date\b",
+    r"\btechcrunch disrupt\b",
+    r"\bcall for (papers|speakers)\b",
+    r"\bearly[- ]bird\b",
+    # resenha de produto
+    rf"^\s*review\s*{_SEP}",
+    rf"{_SEP}\s*review\s*$",
+]
+
+# Seções que publicam qualquer coisa menos notícia. Comparadas só com o caminho
+# da URL, para que um domínio como technologyreview.com não case por engano.
+NOISE_PATH_PATTERNS = [
+    r"/opinion(/|$)",
+    r"/opiniao(/|$)",
+    r"/opini[oó]n(/|$)",
+    r"/commentisfree(/|$)",
+    r"/meinung(/|$)",
+    r"/kommentar",
+    r"/colunas?(/|$)",
+    r"/podcasts?(/|$)",
+    r"/audio(/|$)",
+    r"/videos?(/|$)",
+    r"/live(/|$)",
+    r"/liveblog",
+    r"/newsletters?(/|$)",
+    r"/webinar",
+    r"/deals?(/|$)",
+    r"/coupons?(/|$)",
+    r"/gift",
+    r"/quiz",
+    r"/interviews?(/|$)",
+    r"/reviews?(/|$)",
+    r"/how-to(/|$)",
+    r"/tutorial",
+    r"/sponsored",
+    r"/advertorial",
+    r"/angebot",
+    r"/events?(/|$)",
+    r"/lifestyle(/|$)",
+    r"/sports?(/|$)",
+    r"/entertainment(/|$)",
+    r"/culture(/|$)",
+]
+
+NOISE_TITLE_REGEX = [re.compile(pattern, re.IGNORECASE) for pattern in NOISE_TITLE_PATTERNS]
+NOISE_PATH_REGEX = [re.compile(pattern, re.IGNORECASE) for pattern in NOISE_PATH_PATTERNS]
+
+# Categorias de acontecimento e o peso de cada uma. Um título pode cair em mais
+# de uma; o total é limitado por CATEGORY_SCORE_CAP para que um acúmulo de
+# palavras-chave não supere uma notícia de fato importante.
+EVENT_SIGNALS: dict[str, tuple[float, list[str]]] = {
+    # lançamento de produto, modelo ou padrão técnico
+    "lancamento": (
+        4.0,
+        [
+            "launch", "launches", "launched", "launching", "introducing", "introduces",
+            "unveils", "unveiled", "announces", "announced", "announcement", "releases",
+            "released", "release", "debuts", "rolls out", "rolling out", "now available",
+            "general availability", "open-sources", "open sources", "open weights",
+            "open-weight", "rolled out", "ships", "new standard", "new protocol",
+            "lança", "lançou", "lançamento", "apresenta", "anuncia", "anunciou", "estreia",
+            "lanza", "presenta", "anuncia", "dévoile", "lance", "annonce",
+            "stellt vor", "vorgestellt", "veröffentlicht", "kündigt an", "startet",
+            "発表", "公開", "リリース", "提供開始", "投入", "発売",
+            "推出", "发布", "上线", "출시", "공개",
+        ],
+    ),
+    # modelo novo ou nova versão de modelo
+    "modelo": (
+        4.0,
+        [
+            "new model", "frontier model", "foundation model", "flagship model",
+            "reasoning model", "multimodal model", "world model", "novo modelo",
+            "neues modell", "新モデル", "新型モデル", "新模型", "새 모델",
+        ],
+    ),
+    # aquisição, fusão, rodada de investimento
+    "negocio": (
+        3.5,
+        [
+            "acquire", "acquires", "acquired", "acquiring", "acquisition", "buys",
+            "buyout", "merger", "merges", "takeover", "raises", "raised", "funding",
+            "funding round", "valuation", "valued at", "invests", "investment", "ipo",
+            "stake", "billion", "trillion",
+            "adquire", "aquisição", "compra", "fusão", "bilhões", "trilhões",
+            "investimento", "rodada", "avaliada", "aporte",
+            "übernimmt", "übernahme", "kauft", "milliarden", "investiert", "beteiligung",
+            "買収", "出資", "調達", "億ドル", "兆",
+            "收购", "融资", "인수", "투자",
+        ],
+    ),
+    # regulação, tribunais, política pública
+    "politica": (
+        3.0,
+        [
+            # "act" sozinho é verbo comum em inglês; só vale como nome de lei.
+            "regulation", "regulator", "regulators", "regulatory", "law", "bill",
+            "ai act", "court", "judge", "ruling", "lawsuit", "sues", "sued",
+            "settlement", "ban", "bans", "banned", "antitrust", "probe", "subpoena",
+            # "fine" também casaria "fine-tuning"; só a forma verbal conta.
+            "fined", "fines",
+            "sanctions", "export controls", "executive order", "congress", "senate",
+            "parliament", "treaty", "moratorium",
+            "regulação", "regulamentação", "lei", "projeto de lei", "tribunal", "juiz",
+            "processo", "multa", "proibição", "veto", "liminar", "decreto",
+            "gericht", "urteil", "klage", "gesetz", "verbot", "regulierung", "aufsicht",
+            "規制", "訴訟", "判決", "法案", "禁止", "监管", "诉讼", "규제", "소송",
+        ],
+    ),
+    # incidentes de segurança e uso indevido
+    "seguranca": (
+        2.5,
+        [
+            "hack", "hacked", "hackers", "hacking", "breach", "cyberattack",
+            "cyberattacks", "malware", "exploit", "vulnerability", "ransomware",
+            "leaked", "jailbreak", "misuse", "espionage", "deepfake", "deepfakes",
+            "ataque", "invasão", "vazamento", "violação", "espionagem",
+            "angriff", "sicherheitslücke", "datenleck",
+            "攻撃", "侵入", "漏洞", "해킹",
+        ],
+    ),
+    # pesquisa e resultados científicos
+    "pesquisa": (
+        2.5,
+        [
+            "research", "researchers", "study", "paper", "breakthrough", "discovery",
+            "benchmark", "outperforms", "state-of-the-art", "arxiv",
+            "peer-reviewed", "evaluation", "evaluations",
+            "pesquisa", "estudo", "descoberta", "avanço", "artigo científico",
+            "forschung", "studie", "durchbruch",
+            "研究", "論文", "突破", "연구",
+        ],
+    ),
+    # infraestrutura: chips, data centers, energia
+    "infraestrutura": (
+        2.0,
+        [
+            "data center", "data centre", "datacenter", "data centers", "data centres",
+            "chip", "chips", "semiconductor", "semiconductors", "gpu", "gpus", "tpu",
+            "wafer", "foundry", "hbm", "supercomputer", "gigawatt", "cluster",
+            "centro de dados", "semicondutor", "semicondutores",
+            "rechenzentrum", "halbleiter",
+            "半導体", "データセンター", "数据中心", "반도체",
+        ],
+    ),
+    # movimento de mercado e expansão de operação
+    "negocios_operacao": (
+        2.0,
+        [
+            "earnings", "revenue", "profit", "shares", "market cap", "layoffs",
+            "cuts jobs", "resigns", "steps down", "expands", "expanding", "expansion",
+            "opens", "opening", "enters", "partnership", "partners with", "deal",
+            "receita", "lucro", "ações", "demissões", "expande", "expansão", "parceria",
+            "operação", "escritório", "renuncia",
+            "umsatz", "gewinn", "aktien", "entlassungen", "eröffnet", "partnerschaft",
+            "決算", "売上", "株価", "進出", "提携",
+        ],
+    ),
+}
+
+CATEGORY_SCORE_CAP = 10.0
+ENTITY_SCORE = 1.0
+ENTITY_SCORE_CAP = 3.0
+# Uma história publicada por vários veículos é, por definição, a mais relevante
+# do dia. Cada veículo extra soma este bônus, até o teto.
+CLUSTER_BONUS = 2.0
+CLUSTER_BONUS_CAP = 6.0
+
+# Famílias de modelo: o nome da família junto de um número de versão indica
+# lançamento ou atualização de modelo, em qualquer idioma.
+# "Nova" ficou de fora de propósito: em português é adjetivo comum ("nova versão"),
+# e casaria com qualquer título que trouxesse um número.
+MODEL_FAMILIES = [
+    "gpt", "claude", "gemini", "llama", "grok", "qwen", "deepseek", "mistral", "glm",
+    "phi", "sora", "veo", "imagen", "kimi", "ernie", "hunyuan", "doubao",
+    "minimax", "granite", "falcon", "olmo", "stable diffusion", "flux", "whisper",
+    "copilot", "titan", "command r", "gemma", "codestral",
+]
+# Versão curta (5, 4.8, 1.1) — quatro dígitos seriam ano, não versão.
+VERSION_PATTERN = re.compile(r"(?<![\w.])\d{1,2}(?:\.\d+)?(?![\w])")
+
+# Organizações cuja presença no título indica notícia de peso. As chaves são a
+# forma canônica usada para agrupar a mesma história em idiomas diferentes.
+MAJOR_ENTITIES: dict[str, list[str]] = {
+    "openai": ["openai", "chatgpt", "sam altman"],
+    "anthropic": ["anthropic", "claude"],
+    "google": ["google", "alphabet", "deepmind", "gemini", "waymo", "youtube"],
+    "meta": ["meta", "facebook", "instagram", "llama", "zuckerberg"],
+    "microsoft": ["microsoft", "copilot", "azure"],
+    "nvidia": ["nvidia", "jensen huang"],
+    "amazon": ["amazon", "aws", "bedrock", "alexa"],
+    "apple": ["apple", "siri"],
+    "xai": ["xai", "grok"],
+    "musk": ["elon musk"],
+    "mistral": ["mistral"],
+    "deepseek": ["deepseek"],
+    "alibaba": ["alibaba", "qwen", "阿里巴巴"],
+    "bytedance": ["bytedance", "tiktok", "doubao"],
+    "baidu": ["baidu", "ernie"],
+    "tencent": ["tencent", "hunyuan"],
+    "huawei": ["huawei", "ascend"],
+    "zhipu": ["zhipu", "glm", "智谱"],
+    "moonshot": ["moonshot", "kimi"],
+    "huggingface": ["hugging face", "huggingface", "hugging-face"],
+    "tsmc": ["tsmc"],
+    "samsung": ["samsung"],
+    "skhynix": ["sk hynix", "sk-hynix"],
+    "amd": ["amd"],
+    "intel": ["intel"],
+    "qualcomm": ["qualcomm"],
+    "broadcom": ["broadcom"],
+    "asml": ["asml"],
+    "oracle": ["oracle"],
+    "salesforce": ["salesforce", "agentforce"],
+    "ibm": ["ibm", "watson"],
+    "tesla": ["tesla"],
+    "perplexity": ["perplexity"],
+    "cohere": ["cohere"],
+    "midjourney": ["midjourney"],
+    "databricks": ["databricks"],
+    "palantir": ["palantir"],
+    "softbank": ["softbank"],
+    "adobe": ["adobe", "firefly", "photoshop"],
+    "safe_superintelligence": ["safe superintelligence", "ssi"],
+    "thinking_machines": ["thinking machines"],
+    "eu": [
+        "european union", "european commission", "eu ai act", "brussels",
+        "união europeia", "comissão europeia", "eu-kommission",
+    ],
+    # Uma mesma decisão é noticiada ora como "Pentagon", ora como "Trump
+    # administration", ora como "US judge": todas apontam para o governo dos EUA,
+    # e sem juntá-las a notícia sai duas vezes no relatório.
+    "us_gov": [
+        "white house", "pentagon", "congress", "u.s. senate", "ftc", "sec", "doj",
+        "department of defense", "trump administration", "us judge", "u.s. judge",
+        "federal judge", "us court", "u.s. court", "casa branca", "pentágono",
+        "governo trump", "weißes haus", "us-regierung", "us-gericht",
+    ],
+    "united_nations": ["united nations", "nações unidas", "vereinte nationen"],
+}
+
+# Números com pelo menos dois dígitos ancoram a mesma história em idiomas
+# diferentes ("12.9 billion" e "12,9 Milliarden").
+NUMBER_PATTERN = re.compile(r"\d[\d.,]*\d|\d")
+
 
 # GDELT devolve o idioma pelo nome em inglês; o relatório usa códigos ISO 639-1.
 LANGUAGE_CODES = {
@@ -186,6 +518,9 @@ class Article:
     url: str
     url_key: str
     text: str = field(default="")
+    # Preenchidos na etapa de relevância.
+    outlets: int = field(default=1)
+    score: float = field(default=0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +608,34 @@ def is_allowed_source(url: str, allowlist: list[str]) -> bool:
     return any(host == domain or host.endswith(f".{domain}") for domain in allowlist)
 
 
+def build_tier_lookup(sources: dict):
+    """Devolve uma função url -> peso, conforme as faixas de fonte da configuração.
+
+    O peso mais específico ganha: um domínio listado em `tutorial` (blog de
+    tutoriais de produto) pesa negativo mesmo que o domínio-raiz também apareça
+    numa faixa alta.
+    """
+    tiers = sources.get("tiers") or {}
+    default = float(sources.get("default_weight", 0))
+
+    ranked: list[tuple[str, float]] = []
+    for tier in tiers.values():
+        weight = float((tier or {}).get("weight", 0))
+        for domain in (tier or {}).get("domains") or []:
+            ranked.append((str(domain).strip().lower(), weight))
+    # Domínio mais longo primeiro: "aws.amazon.com" vence "amazon.com".
+    ranked.sort(key=lambda item: len(item[0]), reverse=True)
+
+    def tier_of(url: str) -> float:
+        host = domain_of(url)
+        for domain, weight in ranked:
+            if host == domain or host.endswith(f".{domain}"):
+                return weight
+        return default
+
+    return tier_of
+
+
 def language_code(value: str | None) -> str:
     if not value:
         return ""
@@ -299,17 +662,109 @@ def has_ai_context(text: str) -> bool:
     return any(token_pattern(token).search(lowered) for token in AI_CONTEXT_TOKENS)
 
 
-def is_ai_related(text: str, keywords: list[str]) -> bool:
+def is_ai_related(text: str, keywords: list[str], trust_ambiguous: bool = False) -> bool:
     """Aceita o texto quando casa com um termo forte da lista, com um termo ambíguo
-    em contexto de IA, ou com um sinal de IA em outro idioma."""
+    em contexto de IA, ou com um sinal de IA em outro idioma.
+
+    Em veículos que só publicam sobre IA (`trust_ambiguous`), termos como "Claude"
+    e "Gemini" já valem sozinhos — sem isso, um título como "Introducing Claude
+    Opus 5" seria descartado por não conter nenhuma outra palavra sobre IA.
+    """
     lowered = text.lower()
     for keyword in keywords:
         if not token_pattern(keyword).search(lowered):
             continue
-        if keyword.lower() in AMBIGUOUS_KEYWORDS:
+        if keyword.lower() in AMBIGUOUS_KEYWORDS and not trust_ambiguous:
             continue  # termos ambíguos são confirmados pelo contexto, abaixo
         return True
     return has_ai_context(text)
+
+
+# --------------------------------------------------------------------------- #
+# Relevância: ruído, categoria do acontecimento e pontuação
+# --------------------------------------------------------------------------- #
+
+
+def is_noise(title: str, url: str) -> bool:
+    """Descarta o que não é notícia: podcast, vídeo, opinião, tutorial, promoção."""
+    if any(regex.search(title) for regex in NOISE_TITLE_REGEX):
+        return True
+    path = urlparse(url).path
+    return any(regex.search(path) for regex in NOISE_PATH_REGEX)
+
+
+def is_model_release(title: str) -> bool:
+    """Nome de família de modelo acompanhado de número de versão."""
+    lowered = title.lower()
+    if not any(token_pattern(family).search(lowered) for family in MODEL_FAMILIES):
+        return False
+    return bool(VERSION_PATTERN.search(title))
+
+
+def event_categories(title: str) -> frozenset[str]:
+    """Que tipo de acontecimento o título descreve (pode ser mais de um)."""
+    lowered = title.lower()
+    found = {
+        category
+        for category, (_, tokens) in EVENT_SIGNALS.items()
+        if any(token_pattern(token).search(lowered) for token in tokens)
+    }
+    if is_model_release(title):
+        found.add("modelo")
+    return frozenset(found)
+
+
+def entities_in(title: str) -> frozenset[str]:
+    lowered = title.lower()
+    return frozenset(
+        canonical
+        for canonical, aliases in MAJOR_ENTITIES.items()
+        if any(token_pattern(alias).search(lowered) for alias in aliases)
+    )
+
+
+def normalize_number(raw: str) -> str:
+    """Reduz '12,9' e '12.9' à mesma forma, e '12,900' a '12900'."""
+    text = raw.replace(",", ".").strip(".")
+    parts = [part for part in text.split(".") if part]
+    if not parts:
+        return ""
+    head, tail = parts[0], parts[1:]
+    # Um grupo de exatamente três dígitos é separador de milhar em qualquer notação.
+    while tail and len(tail[0]) == 3:
+        head += tail.pop(0)
+    return head + ("." + ".".join(tail) if tail else "")
+
+
+def significant_numbers(title: str) -> set[str]:
+    """Números que identificam a história (valores, contagens) — anos não contam."""
+    numbers = set()
+    for raw in NUMBER_PATTERN.findall(title):
+        value = normalize_number(raw)
+        digits = value.replace(".", "")
+        if len(digits) < 2:
+            continue
+        if len(digits) == 4 and value.isdigit() and 1900 <= int(value) <= 2100:
+            continue  # ano
+        numbers.add(value)
+    return numbers
+
+
+def story_anchors(title: str) -> frozenset[str]:
+    """Marcas da história que sobrevivem à tradução: organizações e números."""
+    return frozenset(entities_in(title) | significant_numbers(title))
+
+
+def relevance_score(article: Article, tier_weight: float, outlets: int) -> float:
+    categories = event_categories(article.title)
+    score = min(
+        sum(EVENT_SIGNALS[category][0] for category in categories),
+        CATEGORY_SCORE_CAP,
+    )
+    score += min(len(entities_in(article.title)) * ENTITY_SCORE, ENTITY_SCORE_CAP)
+    score += tier_weight
+    score += min((outlets - 1) * CLUSTER_BONUS, CLUSTER_BONUS_CAP)
+    return score
 
 
 # --------------------------------------------------------------------------- #
@@ -360,8 +815,18 @@ def build_gdelt_queries(keywords: list[str]) -> list[str]:
     Os termos ambíguos vão numa consulta própria, que já exige contexto de IA no
     próprio artigo.
     """
-    strong = [k for k in keywords if k.lower() not in AMBIGUOUS_KEYWORDS]
-    ambiguous = [k for k in keywords if k.lower() in AMBIGUOUS_KEYWORDS]
+    # A GDELT recusa a consulta inteira ("The specified phrase is too short")
+    # quando um dos termos tem menos de quatro caracteres, derrubando em silêncio
+    # todo o grupo. Termos curtos como "LLM" e "xAI" ficam de fora por isso.
+    usable = []
+    for keyword in keywords:
+        if len(keyword.strip()) < GDELT_MIN_PHRASE:
+            print(f"  Termo '{keyword}' curto demais para a GDELT; será buscado só no RSS.")
+            continue
+        usable.append(keyword)
+
+    strong = [k for k in usable if k.lower() not in AMBIGUOUS_KEYWORDS]
+    ambiguous = [k for k in usable if k.lower() in AMBIGUOUS_KEYWORDS]
 
     queries: list[str] = []
     for index in range(0, len(strong), GDELT_KEYWORDS_PER_QUERY):
@@ -463,6 +928,8 @@ def gdelt_collect(
         # notícia que só cita IA de passagem. O título precisa confirmar o assunto.
         if not is_ai_related(title, keywords):
             continue
+        if is_noise(title, url):
+            continue
         articles.append(
             Article(
                 title=title,
@@ -543,6 +1010,65 @@ def entry_description(entry) -> str:
     return clean_text(entry.get("summary") or entry.get("description"))
 
 
+def entry_source_title(entry) -> str:
+    """O campo `source` nem sempre vem como dicionário; trata os dois formatos."""
+    source = entry.get("source")
+    if isinstance(source, dict):
+        return clean_text(source.get("title"))
+    return clean_text(source) if isinstance(source, str) else ""
+
+
+def build_rss_article(
+    entry,
+    feed_name: str,
+    feed_language: str,
+    keywords: list[str],
+    allowlist: list[str],
+    ai_only: bool,
+    start: dt.datetime,
+    end: dt.datetime,
+) -> Article | None:
+    """Converte uma entrada de feed em Article, ou devolve None se ela não serve."""
+    link = (entry.get("link") or "").strip()
+    title = clean_text(entry.get("title"))
+    if not link or not title:
+        return None
+    if not is_allowed_source(link, allowlist):
+        return None
+    published = entry_datetime(entry)
+    if published is None or not start <= published.astimezone(start.tzinfo) <= end:
+        return None
+    # O assunto tem de estar no título. Aceitar a descrição fazia entrar matéria de
+    # baleia, futebol ou LibreOffice que só cita IA de passagem. Feeds marcados como
+    # `ai_only` já vêm filtrados pelo veículo, então "Introducing Claude Opus 5"
+    # entra sem precisar repetir a palavra "IA".
+    if not ai_only and not is_ai_related(title, keywords):
+        return None
+    if is_noise(title, link):
+        return None
+
+    description = entry_description(entry)
+    source = entry_source_title(entry) or feed_name
+    # Agregadores (Google News) anexam " - Veículo" ao título e repetem o título
+    # como descrição; sem limpar isso a deduplicação não enxerga que duas entradas
+    # são a mesma notícia.
+    suffix = f" - {source}"
+    if title.endswith(suffix) and len(title) > len(suffix):
+        title = title[: -len(suffix)].strip()
+    if description and is_echo_of_title(description, title, source):
+        description = ""
+
+    return Article(
+        title=title,
+        source=source,
+        published=published,
+        language=language_code(entry.get("language") or feed_language),
+        description=description,
+        url=clean_display_url(link),
+        url_key=normalize_url(link),
+    )
+
+
 def fetch_rss(
     config: dict,
     keywords: list[str],
@@ -571,11 +1097,12 @@ def fetch_rss(
         if not url:
             continue
         name = feed_config.get("name") or urlparse(url).netloc
+        ai_only = bool(feed_config.get("ai_only", False))
         try:
             response = session.get(url, timeout=HTTP_TIMEOUT)
             response.raise_for_status()
             parsed_feed = feedparser.parse(response.content)
-        except requests.RequestException as error:
+        except Exception as error:  # rede, XML corrompido, IDNA inválido...
             print(f"  Feed '{name}' indisponível: {error}")
             continue
         if not parsed_feed.entries:
@@ -585,38 +1112,16 @@ def fetch_rss(
         feed_language = parsed_feed.feed.get("language") if parsed_feed.feed else ""
         kept = 0
         for entry in parsed_feed.entries:
-            link = (entry.get("link") or "").strip()
-            title = clean_text(entry.get("title"))
-            if not link or not title:
-                continue
-            if not is_allowed_source(link, allowlist):
-                continue
-            published = entry_datetime(entry)
-            if published is None or not start <= published.astimezone(start.tzinfo) <= end:
-                continue
-            description = entry_description(entry)
-            if not is_ai_related(f"{title} {description}", keywords):
-                continue
-            source = clean_text(entry.get("source", {}).get("title")) or name
-            # Agregadores (Google News) anexam " - Veículo" ao título e repetem o
-            # título como descrição; sem limpar isso a deduplicação não enxerga que
-            # duas entradas são a mesma notícia.
-            suffix = f" - {source}"
-            if title.endswith(suffix) and len(title) > len(suffix):
-                title = title[: -len(suffix)].strip()
-            if description and is_echo_of_title(description, title, source):
-                description = ""
-            articles.append(
-                Article(
-                    title=title,
-                    source=source,
-                    published=published,
-                    language=language_code(entry.get("language") or feed_language),
-                    description=description,
-                    url=clean_display_url(link),
-                    url_key=normalize_url(link),
+            try:
+                article = build_rss_article(
+                    entry, name, feed_language, keywords, allowlist, ai_only, start, end
                 )
-            )
+            except Exception as error:  # uma entrada malformada não derruba o feed
+                print(f"  Entrada ignorada em '{name}': {error}")
+                continue
+            if article is None:
+                continue
+            articles.append(article)
             kept += 1
         print(f"  RSS '{name}': {kept} artigo(s)", flush=True)
 
@@ -624,7 +1129,7 @@ def fetch_rss(
 
 
 # --------------------------------------------------------------------------- #
-# Deduplicação e ordenação
+# Agrupamento da mesma história e seleção das mais relevantes
 # --------------------------------------------------------------------------- #
 
 
@@ -633,7 +1138,38 @@ def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def deduplicate(articles: list[Article], threshold: int) -> list[Article]:
+@dataclass
+class Story:
+    """A mesma notícia contada por um ou mais veículos."""
+
+    representative: Article
+    comparable: str
+    anchors: frozenset[str]
+    categories: frozenset[str]
+    outlets: int = 1
+    tier: float = 0.0
+
+
+def same_story(story: Story, comparable: str, anchors: frozenset[str],
+               categories: frozenset[str], threshold: int) -> bool:
+    """Duas notícias são a mesma história quando o título coincide, ou quando
+    compartilham duas âncoras (organização, valor) e o tipo de acontecimento.
+
+    A segunda regra é o que junta "Nvidia agrees to buy Hugging Face for $12.9
+    billion" com "Nvidia übernimmt Hugging Face für 12,9 Milliarden Dollar";
+    exigir o tipo de acontecimento em comum evita colar duas notícias diferentes
+    que apenas citam as mesmas empresas.
+    """
+    if comparable and story.comparable:
+        if fuzz.token_sort_ratio(comparable, story.comparable) >= threshold:
+            return True
+    if len(anchors & story.anchors) < 2:
+        return False
+    return bool(categories & story.categories)
+
+
+def cluster_stories(articles: list[Article], threshold: int, tier_of) -> list[Story]:
+    """Agrupa duplicatas e escolhe, para cada história, a versão de melhor fonte."""
     ordered = sorted(articles, key=lambda item: item.published, reverse=True)
 
     unique: list[Article] = []
@@ -644,23 +1180,51 @@ def deduplicate(articles: list[Article], threshold: int) -> list[Article]:
         seen_urls.add(article.url_key)
         unique.append(article)
 
-    kept: list[Article] = []
-    kept_titles: list[str] = []
+    stories: list[Story] = []
     for article in unique:
         comparable = normalize_title(article.title)
-        if comparable and kept_titles:
-            match = process.extractOne(
-                comparable,
-                kept_titles,
-                scorer=fuzz.token_sort_ratio,
-                score_cutoff=threshold,
-            )
-            if match:
-                continue
-        kept.append(article)
-        kept_titles.append(comparable)
+        anchors = story_anchors(article.title)
+        categories = event_categories(article.title)
+        tier = tier_of(article.url)
 
-    return kept
+        for story in stories:
+            if not same_story(story, comparable, anchors, categories, threshold):
+                continue
+            story.outlets += 1
+            # A versão publicada pela fonte mais forte vira a representante.
+            if tier > story.tier:
+                story.representative = article
+                story.comparable = comparable
+                story.anchors = anchors
+                story.categories = categories
+                story.tier = tier
+            break
+        else:
+            stories.append(
+                Story(
+                    representative=article,
+                    comparable=comparable,
+                    anchors=anchors,
+                    categories=categories,
+                    tier=tier,
+                )
+            )
+
+    return stories
+
+
+def select_top(stories: list[Story], limit: int, min_score: float) -> list[Article]:
+    """Pontua cada história e devolve as mais relevantes, da maior para a menor."""
+    selected: list[Article] = []
+    for story in stories:
+        article = story.representative
+        article.outlets = story.outlets
+        article.score = relevance_score(article, story.tier, story.outlets)
+        if article.score >= min_score:
+            selected.append(article)
+
+    selected.sort(key=lambda item: (item.score, item.published), reverse=True)
+    return selected[:limit]
 
 
 # --------------------------------------------------------------------------- #
@@ -670,13 +1234,17 @@ def deduplicate(articles: list[Article], threshold: int) -> list[Article]:
 
 def extract_text(html_bytes: bytes, url: str, title: str = "") -> str:
     """Extrai o corpo da notícia, descartando menus, anúncios e comentários."""
-    text = trafilatura.extract(
-        html_bytes,
-        url=url,
-        include_comments=False,
-        include_tables=False,
-        favor_precision=True,
-    )
+    try:
+        text = trafilatura.extract(
+            html_bytes,
+            url=url,
+            include_comments=False,
+            include_tables=False,
+            favor_precision=True,
+        )
+    except Exception:
+        # HTML quebrado derruba o extrator; a notícia entra só com os metadados.
+        return ""
     if not text:
         return ""
     paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
@@ -701,12 +1269,19 @@ def fetch_full_texts(articles: list[Article], config: dict) -> None:
     session.headers.update({"User-Agent": BROWSER_UA, "Accept-Language": "*"})
 
     def download(article: Article) -> None:
+        # Qualquer erro aqui é local à notícia: sem texto, ela ainda entra no
+        # relatório com os metadados. Antes, uma exceção fora de RequestException
+        # (URL com domínio inválido, por exemplo) subia pelo pool e abortava a
+        # execução inteira — foi assim que o relatório do dia deixou de sair.
         try:
             response = session.get(article.url, timeout=timeout, allow_redirects=True)
             response.raise_for_status()
-        except requests.RequestException:
+        except Exception:
             return
-        text = extract_text(response.content, response.url, article.title)
+        try:
+            text = extract_text(response.content, response.url, article.title)
+        except Exception:
+            return
         # Textos muito curtos costumam ser aviso de cookies ou chamada de paywall.
         if len(text) < min_chars:
             return
@@ -742,7 +1317,8 @@ def render_markdown(articles: list[Article], target: dt.date, zone, timezone_nam
         "",
         f"# Notícias de Inteligência Artificial — {human_date}",
         "",
-        "Relatório automático com notícias encontradas nas fontes configuradas.",
+        "Seleção automática das notícias de maior impacto do dia, apuradas em "
+        "veículos oficiais. Ordenadas da mais para a menos relevante.",
         "",
     ]
 
@@ -750,6 +1326,12 @@ def render_markdown(articles: list[Article], target: dt.date, zone, timezone_nam
         lines.append("Nenhuma notícia encontrada para esta data nas fontes configuradas.")
         lines.append("")
         return "\n".join(lines)
+
+    lines.append("## Resumo do dia")
+    lines.append("")
+    for index, article in enumerate(articles, start=1):
+        lines.append(f"{index}. **{article.title}** — {article.source}")
+    lines.extend(["", "---", ""])
 
     for index, article in enumerate(articles, start=1):
         if index > 1:
@@ -761,6 +1343,9 @@ def render_markdown(articles: list[Article], target: dt.date, zone, timezone_nam
         lines.append(f"- **Publicado em:** {published_local}")
         if article.language:
             lines.append(f"- **Idioma:** {article.language}")
+        if article.outlets > 1:
+            lines.append(f"- **Cobertura:** {article.outlets} veículos noticiaram o caso")
+        lines.append(f"- **Relevância:** {article.score:.1f}")
         lines.append(f"- **Link:** {article.url}")
         lines.append("")
         body = article.text or article.description
@@ -793,6 +1378,12 @@ def sanitize_body(text: str) -> str:
 
 
 def main() -> int:
+    # Títulos em japonês ou alemão aparecem nas mensagens de erro; num console
+    # que não fala UTF-8 (Windows) isso derrubaria a execução no meio.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = argparse.ArgumentParser(
         description="Coleta notícias globais sobre Inteligência Artificial de um dia."
     )
@@ -817,18 +1408,42 @@ def main() -> int:
     allowlist = []
     if sources.get("official_only", True):
         allowlist = [str(d).strip().lower() for d in (sources.get("allowlist") or []) if str(d).strip()]
+    tier_of = build_tier_lookup(sources)
+
+    report = config.get("report") or {}
+    max_articles = int(report.get("max_articles", 15))
+    min_score = float(report.get("min_score", 3))
 
     print(f"Coletando notícias de {target.isoformat()} ({timezone_name})")
     if allowlist:
         print(f"Restrito a {len(allowlist)} veículos oficiais da lista de fontes.")
-    articles = fetch_gdelt(config, keywords, allowlist, start, end)
-    articles += fetch_rss(config, keywords, allowlist, start, end)
+
+    # Cada coletor é isolado: se um cair, o relatório sai com o que o outro trouxe.
+    articles: list[Article] = []
+    for label, collect in (
+        ("GDELT", lambda: fetch_gdelt(config, keywords, allowlist, start, end)),
+        ("RSS", lambda: fetch_rss(config, keywords, allowlist, start, end)),
+    ):
+        try:
+            articles += collect()
+        except Exception as error:
+            print(f"  Coletor {label} falhou por completo: {error!r}")
     print(f"Total bruto: {len(articles)} artigo(s)")
 
-    articles = deduplicate(articles, threshold)
-    print(f"Após deduplicação: {len(articles)} artigo(s)")
+    stories = cluster_stories(articles, threshold, tier_of)
+    print(f"Histórias distintas: {len(stories)}")
 
-    fetch_full_texts(articles, config)
+    articles = select_top(stories, max_articles, min_score)
+    print(
+        f"Selecionadas {len(articles)} notícia(s) "
+        f"(teto de {max_articles}, relevância mínima {min_score:g})."
+    )
+
+    try:
+        fetch_full_texts(articles, config)
+    except Exception as error:
+        # Sem o texto integral o relatório ainda vale; sem relatório, o dia se perde.
+        print(f"Falha ao baixar o texto das notícias: {error!r}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"IA_{target.strftime('%Y%m%d')}.md"
